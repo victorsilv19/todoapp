@@ -179,7 +179,10 @@ resource "google_compute_instance" "database" {
   }
 
   lifecycle {
-    ignore_changes = [boot_disk[0].initialize_params[0].image]
+    ignore_changes = [
+      boot_disk[0].initialize_params[0].image,
+      attached_disk,
+    ]
   }
 
   depends_on = [
