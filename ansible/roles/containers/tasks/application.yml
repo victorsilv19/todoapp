@@ -115,6 +115,10 @@
       ansible.builtin.debug:
         var: application_backend_logs.stdout_lines
 
+    - name: Display backend error logs after a failed startup
+      ansible.builtin.debug:
+        var: application_backend_logs.stderr_lines
+
     - name: Fail deployment after collecting backend logs
       ansible.builtin.fail:
         msg: "Application containers did not become ready; inspect the backend logs above."
