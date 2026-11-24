@@ -137,6 +137,102 @@
   delay: 3
   until: mongo_health.rc == 0
 
+- name: Check the current MongoDB application credentials
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - todo-mongo
+      - mongosh
+      - --quiet
+      - --username
+      - "{{ mongo_app_username }}"
+      - --password
+      - "{{ mongo_app_password }}"
+      - --authenticationDatabase
+      - todo-app
+      - --eval
+      - "db.runCommand({ ping: 1 }).ok"
+  register: mongo_app_auth_before_sync
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Synchronize the MongoDB application user with the deployment secret
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - todo-mongo
+      - mongosh
+      - --quiet
+      - --username
+      - "{{ mongo_root_username }}"
+      - --password
+      - "{{ mongo_root_password }}"
+      - --authenticationDatabase
+      - admin
+      - --eval
+      - >-
+        const appDatabase = db.getSiblingDB("todo-app");
+        const appUsername = {{ mongo_app_username | to_json }};
+        const appPassword = {{ mongo_app_password | to_json }};
+        const existingUser = appDatabase.getUser(appUsername);
+        if (existingUser) {
+          appDatabase.updateUser(appUsername, {
+            pwd: appPassword,
+            roles: [{ role: "readWrite", db: "todo-app" }]
+          });
+        } else {
+          appDatabase.createUser({
+            user: appUsername,
+            pwd: appPassword,
+            roles: [{ role: "readWrite", db: "todo-app" }]
+          });
+        }
+  register: mongo_app_user_sync
+  changed_when: (mongo_app_user_sync.rc | default(1)) == 0
+  failed_when: false
+  no_log: true
+  when: (mongo_app_auth_before_sync.rc | default(1)) != 0
+
+- name: Confirm the MongoDB application user was synchronized
+  ansible.builtin.assert:
+    that:
+      - (mongo_app_auth_before_sync.rc | default(1)) == 0 or (mongo_app_user_sync.rc | default(1)) == 0
+    fail_msg: >-
+      MongoDB application-user synchronization failed. Confirm
+      MONGODB_ROOT_PASSWORD matches the root account in the persistent database.
+
+- name: Verify MongoDB application credentials after synchronization
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - todo-mongo
+      - mongosh
+      - --quiet
+      - --username
+      - "{{ mongo_app_username }}"
+      - --password
+      - "{{ mongo_app_password }}"
+      - --authenticationDatabase
+      - todo-app
+      - --eval
+      - "db.runCommand({ ping: 1 }).ok"
+  register: mongo_app_auth_check
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Confirm the MongoDB application credentials are valid
+  ansible.builtin.assert:
+    that:
+      - (mongo_app_auth_check.rc | default(1)) == 0
+    fail_msg: >-
+      MongoDB rejected the application credentials after synchronization.
+      Confirm MONGODB_APP_PASSWORD is the current GitHub Secret.
+
 - name: Install a protected MongoDB backup environment file
   ansible.builtin.template:
     src: backup.env.j2
