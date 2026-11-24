@@ -1,14 +1,18 @@
 # Etapa 1: Construção da aplicação
-FROM node:18-alpine as build
+FROM node:22.14.0-alpine3.21 as build
 
 # Definindo o diretório de trabalho dentro do container
 WORKDIR /app
+
+# Permite apontar a interface para a API publicada no mesmo domínio.
+ARG REACT_APP_API_URL=http://localhost:5000/todos
+ENV REACT_APP_API_URL=$REACT_APP_API_URL
 
 # Copiando o package.json e o package-lock.json para instalar as dependências
 COPY package*.json ./
 
 # Instalando as dependências do projeto
-RUN npm install
+RUN npm ci
 
 # Copiando todo o conteúdo da pasta do projeto para o container
 COPY . .
@@ -17,7 +21,7 @@ COPY . .
 RUN npm run build
 
 # Etapa 2: Servindo a aplicação
-FROM nginx:alpine
+FROM nginx:1.28.0-alpine
 
 # Copiando o build da etapa anterior para o diretório padrão do Nginx
 COPY --from=build /app/build /usr/share/nginx/html

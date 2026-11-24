@@ -20,21 +20,26 @@ services:
       - todo-net
     depends_on:
       - mongo  # Garante que o MongoDB esteja rodando antes de iniciar o backend
+    environment:
+      MONGODB_URI: ${MONGODB_URI:?Set MONGODB_URI in the ignored .env file}
 
   mongo:
     build:
       context: ./banco-de-dados  # Diretório do backend
     container_name: mongo-todo
-    ports:
-      - "27017:27017"
     networks:
       - todo-net
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=root
-      - MONGO_INITDB_ROOT_PASSWORD=rootpassword
-      - MONGO_INITDB_DATABASE=todo-app
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in the ignored .env file}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in the ignored .env file}
+      MONGO_INITDB_DATABASE: todo-app
+    volumes:
+      - mongo-data:/data/db
 
 
 networks:
   todo-net:
     driver: bridge
+
+volumes:
+  mongo-data:

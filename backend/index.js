@@ -5,18 +5,19 @@ const bodyParser = require('body-parser');
 
 // Inicializando o app Express
 const app = express();
-const port = 5000;
+const port = Number(process.env.PORT || 5000);
+const mongoUri = process.env.MONGODB_URI;
 
-// Conexão com o MongoDB (com autenticação)
-mongoose.connect('mongodb://root:rootpassword@mongo-todo:27017/todo-app?authSource=admin', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-  .then(() => console.log('Conectado ao MongoDB'))
-  .catch((err) => console.error('Erro ao conectar ao MongoDB:', err));
+if (!mongoUri) {
+  console.error('MONGODB_URI is required.');
+  process.exit(1);
+}
 
 // Middleware para habilitar CORS e processar JSON
-app.use(cors());
+const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost,http://localhost:3000')
+  .split(',')
+  .map((origin) => origin.trim());
+app.use(cors({ origin: allowedOrigins }));
 app.use(bodyParser.json());
 
 // Definindo o modelo de Tarefa (To-do)
@@ -92,7 +93,14 @@ app.delete('/todos/:id', async (req, res) => {
   }
 });
 
-// Iniciando o servidor na porta 5000
-app.listen(port, () => {
-  console.log(`Servidor rodando na porta ${port}`);
-});
+mongoose.connect(mongoUri)
+  .then(() => {
+    console.log('Conectado ao MongoDB');
+    app.listen(port, () => {
+      console.log(`Servidor rodando na porta ${port}`);
+    });
+  })
+  .catch((err) => {
+    console.error('Erro ao conectar ao MongoDB:', err.name);
+    process.exit(1);
+  });
