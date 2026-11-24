@@ -101,6 +101,9 @@ mongoose.connect(mongoUri)
     });
   })
   .catch((err) => {
-    console.error('Erro ao conectar ao MongoDB:', err.name);
+    console.error('Erro ao conectar ao MongoDB:', err.name, {
+      code: err.code,
+      codeName: err.codeName,
+    });
     process.exit(1);
   });
