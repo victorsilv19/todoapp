@@ -257,7 +257,6 @@ jobs:
           DOCKER_TAG: ${{ inputs.docker_tag }}
           UPDATE_OS: ${{ inputs.update_os }}
           EXTRA_PACKAGES: ${{ inputs.extra_packages }}
-          ENVIRONMENT: ${{ inputs.environment }}
           INSTANCE_NAME: ${{ inputs.instance_name }}
           MONGODB_ROOT_PASSWORD: ${{ secrets.MONGODB_ROOT_PASSWORD }}
           MONGODB_APP_PASSWORD: ${{ secrets.MONGODB_APP_PASSWORD }}
@@ -274,7 +273,6 @@ jobs:
           from pathlib import Path
 
           values = {
-              "environment": os.environ["ENVIRONMENT"],
               "instance_name": os.environ["INSTANCE_NAME"],
               "docker_image": os.environ["DOCKER_IMAGE"],
               "docker_tag": os.environ["DOCKER_TAG"],
@@ -287,6 +285,7 @@ jobs:
           path.write_text(json.dumps(values), encoding="utf-8")
           path.chmod(0o600)
           PY
+          ansible -i ansible/inventory/hosts.ini db-vm -m ping -vvvv
           ansible-playbook -i ansible/inventory/hosts.ini ansible/playbook.yml \
             --extra-vars "@$RUNNER_TEMP/ansible-extra-vars.json"
 

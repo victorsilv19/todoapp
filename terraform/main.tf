@@ -223,10 +223,10 @@ resource "local_file" "ansible_inventory" {
   filename = "${path.module}/../ansible/inventory/hosts.ini"
   content  = <<-EOT
     [app]
-    app ansible_host=${google_compute_instance.app.network_interface[0].access_config[0].nat_ip} ansible_public_ip=${google_compute_instance.app.network_interface[0].access_config[0].nat_ip} ansible_private_ip=${google_compute_instance.app.network_interface[0].network_ip} ansible_user=${var.ssh_user} ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+    app-vm ansible_host=${google_compute_instance.app.network_interface[0].access_config[0].nat_ip} ansible_public_ip=${google_compute_instance.app.network_interface[0].access_config[0].nat_ip} ansible_private_ip=${google_compute_instance.app.network_interface[0].network_ip} ansible_user=${var.ssh_user} ansible_ssh_common_args='-o StrictHostKeyChecking=no'
 
     [db]
-    db ansible_host=${google_compute_instance.database.network_interface[0].network_ip} ansible_private_ip=${google_compute_instance.database.network_interface[0].network_ip} ansible_user=${var.ssh_user} ansible_ssh_common_args='-o ProxyJump=${var.ssh_user}@${google_compute_instance.app.network_interface[0].access_config[0].nat_ip} -o StrictHostKeyChecking=no'
+    db-vm ansible_host=${google_compute_instance.database.network_interface[0].network_ip} ansible_private_ip=${google_compute_instance.database.network_interface[0].network_ip} ansible_user=${var.ssh_user} ansible_ssh_common_args='-J ${var.ssh_user}@${google_compute_instance.app.network_interface[0].access_config[0].nat_ip} -o StrictHostKeyChecking=no'
 
     [all:vars]
     ansible_python_interpreter=/usr/bin/python3
@@ -235,7 +235,6 @@ resource "local_file" "ansible_inventory" {
     db_private_ip=${google_compute_instance.database.network_interface[0].network_ip}
     mongo_volume_name=${google_compute_attached_disk.mongo_data.device_name}
     mongo_backup_volume_name=${google_compute_attached_disk.mongo_backup.device_name}
-    environment=${var.environment}
     instance_name=${var.instance_name}
   EOT
 }
