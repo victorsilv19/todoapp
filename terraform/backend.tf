@@ -3,7 +3,9 @@ terraform {
     organization = "todoapp-pm4"
 
     workspaces {
-      prefix = "pm04-todoapp-"
+      tags = {
+        application = "pm04-todoapp"
+      }
     }
   }
 }

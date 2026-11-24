@@ -38,7 +38,7 @@ Visitante
 
 ## Terraform Cloud
 
-O state é armazenado remotamente no HCP Terraform. [terraform/backend.tf](terraform/backend.tf) já está configurado para a organização `todoapp-pm4`. Os workspaces `pm04-todoapp-dev`, `pm04-todoapp-homolog` e `pm04-todoapp-prod` devem usar **Execution Mode: Local**: o runner do GitHub executa Terraform com credenciais temporárias via Workload Identity Federation (WIF), e o HCP guarda o state remoto. O Secret `TF_API_TOKEN` autentica a pipeline.
+O state é armazenado remotamente no HCP Terraform. [terraform/backend.tf](terraform/backend.tf) já está configurado para a organização `todoapp-pm4` e seleciona workspaces pela tag chave/valor `application=pm04-todoapp`. Adicione essa tag a cada um dos workspaces `pm04-todoapp-dev`, `pm04-todoapp-homolog` e `pm04-todoapp-prod`, e mantenha **Execution Mode: Local**. Os workflows selecionam os nomes completos; o runner do GitHub executa Terraform com credenciais temporárias via Workload Identity Federation (WIF), e o HCP guarda o state. O Secret `TF_API_TOKEN` autentica a pipeline.
 
 ## Preparar o Google Cloud
 

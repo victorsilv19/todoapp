@@ -21,7 +21,7 @@ O usuário da service account pode criar e destruir recursos no projeto. Restrin
 
 - [ ] Confirmar que [terraform/backend.tf](terraform/backend.tf) aponta para a organização HCP `todoapp-pm4`.
 - [ ] Criar workspaces `pm04-todoapp-dev`, `pm04-todoapp-homolog` e `pm04-todoapp-prod`.
-- [ ] Configurar **Execution Mode: Local** em cada workspace; Terraform roda no GitHub runner e o HCP mantém o state remoto.
+- [ ] Adicionar a tag `application=pm04-todoapp` e configurar **Execution Mode: Local** em cada workspace; Terraform roda no GitHub runner e o HCP mantém o state remoto.
 - [ ] Cadastrar `TF_API_TOKEN` como GitHub Secret.
 
 ## 3 — Configurar GitHub Actions
