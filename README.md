@@ -38,7 +38,7 @@ Visitante
 
 ## Terraform Cloud
 
-O state é armazenado remotamente no HCP Terraform. [terraform/backend.tf](terraform/backend.tf) já está configurado para a organização `todoapp-pm4` e seleciona workspaces pela tag chave/valor `application=pm04-todoapp`. Adicione essa tag a cada um dos workspaces `pm04-todoapp-dev`, `pm04-todoapp-homolog` e `pm04-todoapp-prod`, e mantenha **Execution Mode: Local**. Os workflows selecionam os nomes completos; o runner do GitHub executa Terraform com credenciais temporárias via Workload Identity Federation (WIF), e o HCP guarda o state. O Secret `TF_API_TOKEN` autentica a pipeline.
+O state é armazenado remotamente no HCP Terraform. [terraform/backend.tf](terraform/backend.tf) já está configurado para a organização `todoapp-pm4` e seleciona workspaces pela tag chave/valor `application=pm04-todoapp`. Adicione essa tag a cada um dos workspaces `pm04-todoapp-dev`, `pm04-todoapp-homolog` e `pm04-todoapp-prod`, e mantenha **Execution Mode: Local**. Os workflows selecionam os nomes completos; o runner do GitHub executa Terraform com credenciais temporárias via Workload Identity Federation (WIF), e o HCP guarda o state. O Secret `TF_API_TOKEN` deve conter um **Team API token** com permissão de escrita nos workspaces (por exemplo, o token do time Owners); um Organization API token não pode iniciar plans nem gravar state.
 
 ## Preparar o Google Cloud
 
@@ -88,7 +88,7 @@ Em **Settings > Secrets and variables > Actions**, cadastre:
 | Tipo | Nome | Conteúdo |
 | --- | --- | --- |
 | Secret | `SSH_PRIVATE_KEY` | Chave privada Ed25519 de acesso/Ansible |
-| Secret | `TF_API_TOKEN` | Token de API do HCP Terraform |
+| Secret | `TF_API_TOKEN` | Team API token do HCP com permissão de escrita nos workspaces; não use Organization token |
 | Secret | `MONGODB_ROOT_PASSWORD` | Senha forte para a conta administrativa MongoDB |
 | Secret | `MONGODB_APP_PASSWORD` | Senha forte exclusiva da aplicação |
 | Variable | `GCP_WORKLOAD_IDENTITY_PROVIDER` | Nome completo do provider exibido pelo último comando Cloud Shell |

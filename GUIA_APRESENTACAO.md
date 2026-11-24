@@ -22,7 +22,7 @@ O usuário da service account pode criar e destruir recursos no projeto. Restrin
 - [ ] Confirmar que [terraform/backend.tf](terraform/backend.tf) aponta para a organização HCP `todoapp-pm4`.
 - [ ] Criar workspaces `pm04-todoapp-dev`, `pm04-todoapp-homolog` e `pm04-todoapp-prod`.
 - [ ] Adicionar a tag `application=pm04-todoapp` e configurar **Execution Mode: Local** em cada workspace; Terraform roda no GitHub runner e o HCP mantém o state remoto.
-- [ ] Cadastrar `TF_API_TOKEN` como GitHub Secret.
+- [ ] Cadastrar `TF_API_TOKEN` como GitHub Secret usando um Team API token com permissão de escrita nos workspaces (por exemplo, o token do time Owners). Organization API tokens não podem iniciar plans nem gravar state.
 
 ## 3 — Configurar GitHub Actions
 
@@ -31,7 +31,7 @@ Em **Settings > Secrets and variables > Actions**, adicione:
 **Secrets**
 
 - `SSH_PRIVATE_KEY`: chave privada Ed25519 para SSH e Ansible.
-- `TF_API_TOKEN`: token HCP Terraform.
+- `TF_API_TOKEN`: Team API token do HCP com permissão de escrita nos workspaces; não use Organization token.
 - `MONGODB_ROOT_PASSWORD`: senha forte.
 - `MONGODB_APP_PASSWORD`: senha forte separada para a aplicação.
 
