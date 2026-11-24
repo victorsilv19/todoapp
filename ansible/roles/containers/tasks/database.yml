@@ -72,7 +72,7 @@
     - /opt/todoapp
 
 - name: Mount the persistent MongoDB data and backup volumes
-  ansible.builtin.mount:
+  ansible.posix.mount:
     path: "{{ item.path }}"
     src: "/dev/disk/by-id/google-{{ item.name }}"
     fstype: ext4
