@@ -84,18 +84,40 @@
   no_log: true
 
 - name: Build and start the versioned application containers
-  community.docker.docker_compose_v2:
-    project_src: /opt/todoapp
-    files:
-      - docker-compose.app.yml
-    state: present
-    build: policy
-    pull: missing
-    recreate: auto
-    remove_orphans: true
-    wait: true
-    wait_timeout: 180
-  register: application_compose
+  block:
+    - name: Start the application containers
+      community.docker.docker_compose_v2:
+        project_src: /opt/todoapp
+        files:
+          - docker-compose.app.yml
+        state: present
+        build: policy
+        pull: missing
+        recreate: auto
+        remove_orphans: true
+        wait: true
+        wait_timeout: 180
+      register: application_compose
+  rescue:
+    - name: Capture backend logs after a failed startup
+      ansible.builtin.command:
+        argv:
+          - docker
+          - logs
+          - --tail
+          - "80"
+          - todo-backend
+      register: application_backend_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Display backend logs after a failed startup
+      ansible.builtin.debug:
+        var: application_backend_logs.stdout_lines
+
+    - name: Fail deployment after collecting backend logs
+      ansible.builtin.fail:
+        msg: "Application containers did not become ready; inspect the backend logs above."
 
 - name: Check whether a certificate IP marker exists
   ansible.builtin.stat:
