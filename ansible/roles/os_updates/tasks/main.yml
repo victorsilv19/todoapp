@@ -1,0 +1,20 @@
+---
+- name: Refresh apt metadata when OS updates are requested
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  when: update_os | bool
+
+- name: Apply operating system upgrades when requested
+  ansible.builtin.apt:
+    upgrade: dist
+    update_cache: true
+    autoremove: true
+  when: update_os | bool
+
+- name: Install requested additional packages
+  ansible.builtin.apt:
+    name: "{{ extra_packages.split(',') | map('trim') | reject('equalto', '') | list }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600

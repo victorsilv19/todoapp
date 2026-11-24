@@ -1,0 +1,202 @@
+---
+- name: Install Nginx and OpenSSL
+  ansible.builtin.apt:
+    name:
+      - nginx
+      - openssl
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create application directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /opt/todoapp
+    - /etc/todoapp
+
+- name: Create frontend and backend source directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /opt/todoapp/frontend
+    - /opt/todoapp/backend
+
+- name: Copy frontend source files to the application VM
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../frontend/{{ item.src }}"
+    dest: "/opt/todoapp/frontend/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { src: "Dockerfile", dest: "Dockerfile" }
+    - { src: "package.json", dest: "package.json" }
+    - { src: "package-lock.json", dest: "package-lock.json" }
+
+- name: Copy frontend assets without local build artifacts
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../frontend/{{ item }}/"
+    dest: "/opt/todoapp/frontend/{{ item }}/"
+    owner: root
+    group: root
+    mode: preserve
+  loop:
+    - public
+    - src
+
+- name: Copy backend source files to the application VM
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../backend/{{ item }}"
+    dest: "/opt/todoapp/backend/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - Dockerfile
+    - index.js
+    - package.json
+    - package-lock.json
+
+- name: Copy the production Compose definition
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../docker-compose.app.yml"
+    dest: /opt/todoapp/docker-compose.app.yml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the protected application environment file
+  ansible.builtin.template:
+    src: app.env.j2
+    dest: /opt/todoapp/.env
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Build and start the versioned application containers
+  community.docker.docker_compose_v2:
+    project_src: /opt/todoapp
+    files:
+      - docker-compose.app.yml
+    state: present
+    build: policy
+    pull: missing
+    recreate: auto
+    remove_orphans: true
+    wait: true
+    wait_timeout: 180
+  register: application_compose
+
+- name: Check whether a certificate IP marker exists
+  ansible.builtin.stat:
+    path: /etc/todoapp/tls-ip
+  register: tls_ip_marker
+
+- name: Check whether the HTTPS certificate exists
+  ansible.builtin.stat:
+    path: /etc/ssl/certs/todoapp-selfsigned.crt
+  register: tls_certificate
+
+- name: Read the IP address used by the current certificate
+  ansible.builtin.slurp:
+    src: /etc/todoapp/tls-ip
+  register: tls_ip_marker_content
+  when: tls_ip_marker.stat.exists
+
+- name: Generate or rotate the self-signed HTTPS certificate for the current IP
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -x509
+      - -nodes
+      - -days
+      - "365"
+      - -newkey
+      - rsa:2048
+      - -keyout
+      - /etc/ssl/private/todoapp-selfsigned.key
+      - -out
+      - /etc/ssl/certs/todoapp-selfsigned.crt
+      - -subj
+      - "/CN={{ app_public_ip }}"
+      - -addext
+      - "subjectAltName=IP:{{ app_public_ip }}"
+  when: >-
+    not tls_certificate.stat.exists or
+    not tls_ip_marker.stat.exists or
+    (tls_ip_marker_content.content | default('') | b64decode | trim) != app_public_ip
+  notify: Reload Nginx
+
+- name: Record the IP address in the self-signed certificate
+  ansible.builtin.copy:
+    content: "{{ app_public_ip }}\n"
+    dest: /etc/todoapp/tls-ip
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Protect the private TLS key
+  ansible.builtin.file:
+    path: /etc/ssl/private/todoapp-selfsigned.key
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Configure the Nginx reverse proxy
+  ansible.builtin.template:
+    src: todoapp-nginx.conf.j2
+    dest: /etc/nginx/sites-available/todoapp
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload Nginx
+
+- name: Enable the ToDo App Nginx site
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/todoapp
+    dest: /etc/nginx/sites-enabled/todoapp
+    state: link
+  notify: Reload Nginx
+
+- name: Disable the default Nginx site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Reload Nginx
+
+- name: Enable and start Nginx
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true
+
+- name: Apply pending service restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify the API through the private host binding
+  ansible.builtin.uri:
+    url: http://127.0.0.1:5000/todos
+    status_code: 200
+  register: api_health
+  retries: 12
+  delay: 5
+  until: api_health.status == 200
+
+- name: Verify the public HTTPS reverse proxy
+  ansible.builtin.uri:
+    url: "https://127.0.0.1/todos"
+    headers:
+      Host: "{{ app_public_ip }}"
+    validate_certs: false
+    status_code: 200

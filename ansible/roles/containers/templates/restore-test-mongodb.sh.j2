@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /etc/todo-mongo-backup.env
+archive="$(find "$BACKUP_DIR" -type f -name '*.archive.gz' -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
+if [[ -z "$archive" || ! -f "$archive" ]]; then
+  echo "No MongoDB backup archive is available in $BACKUP_DIR." >&2
+  exit 1
+fi
+
+container="todo-mongo-restore-test-$$"
+temporary_password="$(openssl rand -hex 24)"
+cleanup() {
+  if docker container inspect "$container" >/dev/null 2>&1; then
+    docker rm --force "$container" >/dev/null
+  fi
+}
+trap cleanup EXIT
+
+docker run --detach --rm \
+  --name "$container" \
+  --publish 127.0.0.1::27017 \
+  --tmpfs /data/db:rw,size=512m \
+  --env MONGO_INITDB_ROOT_USERNAME=restore_test \
+  --env "MONGO_INITDB_ROOT_PASSWORD=$temporary_password" \
+  {{ mongo_image | quote }} >/dev/null
+
+port="$(docker port "$container" 27017/tcp)"
+port="${port##*:}"
+restore_uri="mongodb://restore_test:${temporary_password}@127.0.0.1:${port}/admin?authSource=admin"
+
+ready=false
+for attempt in $(seq 1 30); do
+  if docker exec "$container" mongosh "$restore_uri" --quiet --eval 'db.adminCommand("ping").ok' >/dev/null 2>&1; then
+    ready=true
+    break
+  fi
+  sleep 2
+done
+if [[ "$ready" != true ]]; then
+  echo "The isolated MongoDB instance did not become ready." >&2
+  exit 1
+fi
+
+mongorestore --uri="$restore_uri" --gzip --archive="$archive" --nsInclude='todo-app.*'
+collections="$(docker exec "$container" mongosh "$restore_uri" --quiet --eval 'db.getSiblingDB("todo-app").getCollectionNames().length')"
+echo "Isolated restore succeeded from $(basename "$archive"); restored collections: $collections."

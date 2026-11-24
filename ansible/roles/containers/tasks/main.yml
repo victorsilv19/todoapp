@@ -1,0 +1,8 @@
+---
+- name: Configure the database host
+  ansible.builtin.include_tasks: database.yml
+  when: "'db' in group_names"
+
+- name: Configure the application host
+  ansible.builtin.include_tasks: application.yml
+  when: "'app' in group_names"

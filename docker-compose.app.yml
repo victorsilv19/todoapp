@@ -1,0 +1,42 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        REACT_APP_API_URL: /todos
+    image: ${DOCKER_IMAGE:-todo-app}-frontend:${DOCKER_TAG:-1.0.0}
+    container_name: todo-frontend
+    ports:
+      - "127.0.0.1:8080:80"
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+    image: ${DOCKER_IMAGE:-todo-app}-backend:${DOCKER_TAG:-1.0.0}
+    container_name: todo-backend
+    ports:
+      - "127.0.0.1:5000:5000"
+    environment:
+      PORT: "5000"
+      MONGODB_URI: ${MONGODB_URI:?MONGODB_URI must be set in the deployment environment}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:5000/todos',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s

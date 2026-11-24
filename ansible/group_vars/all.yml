@@ -1,0 +1,18 @@
+---
+ansible_user: ubuntu
+ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+
+update_os: false
+extra_packages: "curl,git,unzip"
+docker_image: todo-app
+docker_tag: "1.0.0"
+
+mongo_image: "mongo:8.0.16"
+mongo_app_username: todoapp
+mongo_root_username: root
+mongo_data_dir: /mnt/todo-mongo-data
+mongo_backup_dir: /mnt/todo-mongo-backups
+mongo_backup_retention_days: 7
+
+mongo_root_password: "{{ lookup('env', 'MONGODB_ROOT_PASSWORD') }}"
+mongo_app_password: "{{ lookup('env', 'MONGODB_APP_PASSWORD') }}"

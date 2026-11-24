@@ -1,0 +1,13 @@
+const appDatabase = db.getSiblingDB("todo-app");
+
+appDatabase.createUser({
+  user: {{ mongo_app_username | to_json }},
+  pwd: {{ mongo_app_password | to_json }},
+  roles: [{ role: "readWrite", db: "todo-app" }]
+});
+
+appDatabase.createCollection("todos");
+appDatabase.todos.insertMany([
+  { text: "Conhecer a aplicação da feira", completed: false },
+  { text: "Validar a infraestrutura PM-04", completed: false }
+]);

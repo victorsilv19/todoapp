@@ -1,0 +1,188 @@
+---
+- name: Install MongoDB Database Tools and OpenSSL for restore verification
+  block:
+    - name: Add MongoDB package signing key
+      ansible.builtin.get_url:
+        url: https://pgp.mongodb.com/server-8.0.asc
+        dest: /usr/share/keyrings/mongodb-server-8.0.asc
+        mode: "0644"
+
+    - name: Add MongoDB Database Tools apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/usr/share/keyrings/mongodb-server-8.0.asc]
+          https://repo.mongodb.org/apt/ubuntu {{ ansible_distribution_release }}/mongodb-org/8.0 multiverse
+        filename: mongodb-org-8.0
+        state: present
+        update_cache: true
+
+    - name: Install mongodump and mongorestore
+      ansible.builtin.apt:
+        name:
+          - mongodb-database-tools
+          - openssl
+        state: present
+        update_cache: true
+
+- name: Wait for the attached Google persistent disks
+  ansible.builtin.wait_for:
+    path: "/dev/disk/by-id/google-{{ item }}"
+    state: present
+    timeout: 120
+  loop:
+    - "{{ mongo_volume_name }}"
+    - "{{ mongo_backup_volume_name }}"
+
+- name: Locate the attached MongoDB data disk
+  ansible.builtin.stat:
+    path: "/dev/disk/by-id/google-{{ mongo_volume_name }}"
+  register: mongo_data_volume_device
+
+- name: Locate the attached MongoDB backup disk
+  ansible.builtin.stat:
+    path: "/dev/disk/by-id/google-{{ mongo_backup_volume_name }}"
+  register: mongo_backup_volume_device
+
+- name: Require both attached database volumes
+  ansible.builtin.assert:
+    that:
+      - mongo_data_volume_device.stat.exists
+      - mongo_backup_volume_device.stat.exists
+    fail_msg: "An attached Google persistent disk was not found; refusing to use the VM root disk."
+
+- name: Create ext4 filesystems if the volumes are new
+  community.general.filesystem:
+    dev: "/dev/disk/by-id/google-{{ item }}"
+    fstype: ext4
+    state: present
+  loop:
+    - "{{ mongo_volume_name }}"
+    - "{{ mongo_backup_volume_name }}"
+
+- name: Create MongoDB and backup directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - "{{ mongo_data_dir }}"
+    - "{{ mongo_backup_dir }}"
+    - /opt/todoapp
+
+- name: Mount the persistent MongoDB data and backup volumes
+  ansible.builtin.mount:
+    path: "{{ item.path }}"
+    src: "/dev/disk/by-id/google-{{ item.name }}"
+    fstype: ext4
+    opts: defaults,noatime
+    state: mounted
+  loop:
+    - name: "{{ mongo_volume_name }}"
+      path: "{{ mongo_data_dir }}"
+    - name: "{{ mongo_backup_volume_name }}"
+      path: "{{ mongo_backup_dir }}"
+
+- name: Install the MongoDB initialization script
+  ansible.builtin.template:
+    src: init-mongo.js.j2
+    dest: /opt/todoapp/init-mongo.js
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Start MongoDB with persistent storage and a private-only listener
+  community.docker.docker_container:
+    name: todo-mongo
+    image: "{{ mongo_image }}"
+    pull: missing
+    state: started
+    restart_policy: unless-stopped
+    published_ports:
+      - "{{ db_private_ip }}:27017:27017"
+    env:
+      MONGO_INITDB_ROOT_USERNAME: "{{ mongo_root_username }}"
+      MONGO_INITDB_ROOT_PASSWORD: "{{ mongo_root_password }}"
+      MONGO_INITDB_DATABASE: todo-app
+    volumes:
+      - "{{ mongo_data_dir }}:/data/db"
+      - /opt/todoapp/init-mongo.js:/docker-entrypoint-initdb.d/10-todo-app.js:ro
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "db.adminCommand('ping').ok"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+  no_log: true
+
+- name: Wait for MongoDB to accept connections
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - todo-mongo
+      - mongosh
+      - --quiet
+      - --eval
+      - "db.adminCommand('ping').ok"
+  register: mongo_health
+  changed_when: false
+  retries: 20
+  delay: 3
+  until: mongo_health.rc == 0
+
+- name: Install a protected MongoDB backup environment file
+  ansible.builtin.template:
+    src: backup.env.j2
+    dest: /etc/todo-mongo-backup.env
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Install the MongoDB backup script
+  ansible.builtin.template:
+    src: backup-mongodb.sh.j2
+    dest: /usr/local/sbin/backup-todo-mongodb
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install the MongoDB backup systemd service
+  ansible.builtin.copy:
+    src: todo-mongo-backup.service
+    dest: /etc/systemd/system/todo-mongo-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install the MongoDB backup systemd timer
+  ansible.builtin.copy:
+    src: todo-mongo-backup.timer
+    dest: /etc/systemd/system/todo-mongo-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Enable and start the scheduled MongoDB backup
+  ansible.builtin.systemd:
+    name: todo-mongo-backup.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Install the isolated MongoDB restore verification script
+  ansible.builtin.template:
+    src: restore-test-mongodb.sh.j2
+    dest: /usr/local/sbin/test-todo-mongodb-restore
+    owner: root
+    group: root
+    mode: "0750"

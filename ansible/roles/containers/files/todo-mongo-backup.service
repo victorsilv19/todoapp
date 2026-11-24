@@ -1,0 +1,8 @@
+[Unit]
+Description=Create a compressed logical backup of the ToDo App MongoDB
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/backup-todo-mongodb

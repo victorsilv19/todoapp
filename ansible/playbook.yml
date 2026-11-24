@@ -1,0 +1,16 @@
+---
+- name: Configure the private MongoDB VM
+  hosts: db
+  become: true
+  roles:
+    - os_updates
+    - docker
+    - containers
+
+- name: Configure the public application VM
+  hosts: app
+  become: true
+  roles:
+    - os_updates
+    - docker
+    - containers

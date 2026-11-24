@@ -1,0 +1,139 @@
+name: Destroy ToDo App on GCP
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: HCP Terraform workspace suffix containing the deployment
+        type: choice
+        options:
+          - dev
+          - homolog
+          - prod
+        default: dev
+        required: true
+      instance_name:
+        description: Exact base name used when deploying the resources
+        type: string
+        default: vm-todo-pm04
+        required: true
+      confirmation:
+        description: Type DESTROY to confirm deletion of VMs, disks, VPC, and NAT
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: pm04-infrastructure
+  cancel-in-progress: false
+
+jobs:
+  destroy:
+    name: Destroy GCP resources in ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    env:
+      TF_TOKEN_app_terraform_io: ${{ secrets.TF_API_TOKEN }}
+      TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+      TF_VAR_region: ${{ vars.GCP_REGION }}
+      TF_VAR_zone: ${{ vars.GCP_ZONE }}
+      TF_WORKSPACE: ${{ inputs.environment }}
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
+    steps:
+      - name: Checkout deployment source
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+
+      - name: Validate Workload Identity Federation configuration
+        env:
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          for name in GCP_WORKLOAD_IDENTITY_PROVIDER GCP_SERVICE_ACCOUNT GCP_PROJECT_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required."
+              exit 1
+            fi
+          done
+          test "$GCP_SERVICE_ACCOUNT" = "pm04-github-actions@$GCP_PROJECT_ID.iam.gserviceaccount.com" || {
+            echo "::error::GCP_SERVICE_ACCOUNT must be pm04-github-actions in GCP_PROJECT_ID."
+            exit 1
+          }
+          case "$GCP_WORKLOAD_IDENTITY_PROVIDER" in
+            projects/*/locations/global/workloadIdentityPools/github-actions/providers/github) ;;
+            *) echo "::error::GCP_WORKLOAD_IDENTITY_PROVIDER must identify the github-actions/github provider."; exit 1 ;;
+          esac
+
+      - name: Authenticate to Google Cloud with Workload Identity Federation
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Validate confirmation and configure the public SSH key
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test "$CONFIRMATION" = "DESTROY" || { echo "::error::Type DESTROY in the confirmation input."; exit 1; }
+          test -n "$SSH_PRIVATE_KEY" || { echo "::error::SSH_PRIVATE_KEY secret is required."; exit 1; }
+          KEY_FILE="$RUNNER_TEMP/pm04-deploy-key"
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          SSH_PUBLIC_KEY="$(ssh-keygen -y -f "$KEY_FILE")"
+          echo "TF_VAR_ssh_public_key=$SSH_PUBLIC_KEY" >> "$GITHUB_ENV"
+
+      - name: Initialize Terraform and plan destruction
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          INSTANCE_NAME: ${{ inputs.instance_name }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_ZONE: ${{ vars.GCP_ZONE }}
+        run: |
+          set -euo pipefail
+          for name in GCP_PROJECT_ID GCP_REGION GCP_ZONE; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required."
+              exit 1
+            fi
+          done
+          cd terraform
+          terraform init -input=false
+          terraform validate
+          if ! DEPLOYED_ID="$(terraform output -raw deployment_id)"; then
+            echo "::error::Could not read deployment_id from this workspace; refusing to destroy."
+            exit 1
+          fi
+          EXPECTED_ID="${INSTANCE_NAME}-${ENVIRONMENT}"
+          if [ "$DEPLOYED_ID" != "$EXPECTED_ID" ]; then
+            echo "::error::Workspace deployment_id '$DEPLOYED_ID' does not match '$EXPECTED_ID'; refusing to destroy."
+            exit 1
+          fi
+          terraform plan -destroy -input=false -out="$RUNNER_TEMP/pm04-destroy.tfplan" \
+            -var="environment=$ENVIRONMENT" \
+            -var="instance_name=$INSTANCE_NAME" \
+            -var="project_id=$GCP_PROJECT_ID" \
+            -var="region=$GCP_REGION" \
+            -var="zone=$GCP_ZONE" \
+            -var="ssh_allowed_cidrs=[\"127.0.0.1/32\"]"
+
+      - name: Apply destruction plan
+        run: |
+          set -euo pipefail
+          cd terraform
+          terraform apply -input=false -auto-approve "$RUNNER_TEMP/pm04-destroy.tfplan"
+          echo "GCP resources have been destroyed. Verify the selected project and HCP workspace."
