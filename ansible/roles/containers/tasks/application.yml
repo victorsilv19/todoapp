@@ -1,9 +1,9 @@
 ---
-- name: Install Nginx and OpenSSL
+- name: Install Nginx and Certbot
   ansible.builtin.apt:
     name:
       - nginx
-      - openssl
+      - certbot
     state: present
     update_cache: true
     cache_valid_time: 3600
@@ -123,61 +123,68 @@
       ansible.builtin.fail:
         msg: "Application containers did not become ready; inspect the backend logs above."
 
-- name: Check whether a certificate IP marker exists
+- name: Create the Let's Encrypt HTTP-01 challenge webroot
+  ansible.builtin.file:
+    path: /var/www/certbot/.well-known/acme-challenge
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Check whether the certificate exists for the current hostname
   ansible.builtin.stat:
-    path: /etc/todoapp/tls-ip
-  register: tls_ip_marker
+    path: "/etc/letsencrypt/live/{{ app_domain_name }}/fullchain.pem"
+  register: letsencrypt_certificate
 
-- name: Check whether the HTTPS certificate exists
-  ansible.builtin.stat:
-    path: /etc/ssl/certs/todoapp-selfsigned.crt
-  register: tls_certificate
-
-- name: Read the IP address used by the current certificate
-  ansible.builtin.slurp:
-    src: /etc/todoapp/tls-ip
-  register: tls_ip_marker_content
-  when: tls_ip_marker.stat.exists
-
-- name: Generate or rotate the self-signed HTTPS certificate for the current IP
-  ansible.builtin.command:
-    argv:
-      - openssl
-      - req
-      - -x509
-      - -nodes
-      - -days
-      - "365"
-      - -newkey
-      - rsa:2048
-      - -keyout
-      - /etc/ssl/private/todoapp-selfsigned.key
-      - -out
-      - /etc/ssl/certs/todoapp-selfsigned.crt
-      - -subj
-      - "/CN={{ app_public_ip }}"
-      - -addext
-      - "subjectAltName=IP:{{ app_public_ip }}"
-  when: >-
-    not tls_certificate.stat.exists or
-    not tls_ip_marker.stat.exists or
-    (tls_ip_marker_content.content | default('') | b64decode | trim) != app_public_ip
-  notify: Reload Nginx
-
-- name: Record the IP address in the self-signed certificate
-  ansible.builtin.copy:
-    content: "{{ app_public_ip }}\n"
-    dest: /etc/todoapp/tls-ip
+- name: Configure temporary HTTP access for certificate issuance
+  ansible.builtin.template:
+    src: todoapp-nginx-acme.conf.j2
+    dest: /etc/nginx/sites-available/todoapp-acme
     owner: root
     group: root
     mode: "0644"
+  notify: Reload Nginx
+  when: not letsencrypt_certificate.stat.exists
 
-- name: Protect the private TLS key
+- name: Enable the temporary ACME challenge site
   ansible.builtin.file:
-    path: /etc/ssl/private/todoapp-selfsigned.key
-    owner: root
-    group: root
-    mode: "0600"
+    src: /etc/nginx/sites-available/todoapp-acme
+    dest: /etc/nginx/sites-enabled/todoapp
+    state: link
+    force: true
+  notify: Reload Nginx
+  when: not letsencrypt_certificate.stat.exists
+
+- name: Disable the default Nginx site before certificate issuance
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Reload Nginx
+
+- name: Start Nginx to serve the HTTP-01 challenge
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true
+
+- name: Apply the temporary Nginx configuration
+  ansible.builtin.meta: flush_handlers
+
+- name: Obtain the trusted HTTPS certificate
+  ansible.builtin.command:
+    argv:
+      - certbot
+      - certonly
+      - --non-interactive
+      - --agree-tos
+      - --register-unsafely-without-email
+      - --webroot
+      - --webroot-path
+      - /var/www/certbot
+      - --domain
+      - "{{ app_domain_name }}"
+    creates: "/etc/letsencrypt/live/{{ app_domain_name }}/fullchain.pem"
+  when: not letsencrypt_certificate.stat.exists
 
 - name: Configure the Nginx reverse proxy
   ansible.builtin.template:
@@ -193,13 +200,50 @@
     src: /etc/nginx/sites-available/todoapp
     dest: /etc/nginx/sites-enabled/todoapp
     state: link
+    force: true
   notify: Reload Nginx
 
-- name: Disable the default Nginx site
+- name: Ensure the Certbot deploy-hook directory exists
   ansible.builtin.file:
-    path: /etc/nginx/sites-enabled/default
+    path: /etc/letsencrypt/renewal-hooks/deploy
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the certificate renewal Nginx reload hook
+  ansible.builtin.copy:
+    dest: /etc/letsencrypt/renewal-hooks/deploy/reload-nginx
+    content: |
+      #!/bin/sh
+      systemctl reload nginx
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Enable automatic certificate renewal
+  ansible.builtin.systemd:
+    name: certbot.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Renew certificates that are due for renewal
+  ansible.builtin.command:
+    argv:
+      - certbot
+      - renew
+      - --quiet
+  changed_when: false
+
+- name: Remove the obsolete self-signed certificate and marker
+  ansible.builtin.file:
+    path: "{{ item }}"
     state: absent
-  notify: Reload Nginx
+  loop:
+    - /etc/todoapp/tls-ip
+    - /etc/ssl/private/todoapp-selfsigned.key
+    - /etc/ssl/certs/todoapp-selfsigned.crt
 
 - name: Enable and start Nginx
   ansible.builtin.service:
@@ -220,9 +264,23 @@
   until: api_health.status == 200
 
 - name: Verify the public HTTPS reverse proxy
-  ansible.builtin.uri:
-    url: "https://127.0.0.1/todos"
-    headers:
-      Host: "{{ app_public_ip }}"
-    validate_certs: false
-    status_code: 200
+  ansible.builtin.command:
+    argv:
+      - curl
+      - --fail
+      - --silent
+      - --show-error
+      - --connect-timeout
+      - "5"
+      - --max-time
+      - "20"
+      - --output
+      - /dev/null
+      - --write-out
+      - "%{http_code}"
+      - --resolve
+      - "{{ app_domain_name }}:443:127.0.0.1"
+      - "https://{{ app_domain_name }}/todos"
+  register: public_https_health
+  changed_when: false
+  failed_when: public_https_health.stdout != "200"

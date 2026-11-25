@@ -1,0 +1,360 @@
+---
+- name: Validate the requested operational action
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Require a supported operational action
+      ansible.builtin.assert:
+        that:
+          - operation is defined
+          - operation in ["health", "logs", "restart_app", "restart_database", "recreate_database", "backup", "restore_test"]
+        fail_msg: "Choose health, logs, restart_app, restart_database, recreate_database, backup, or restore_test."
+
+- name: Check application health
+  hosts: app
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Check Nginx service state
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - is-active
+          - nginx
+      register: nginx_service_state
+      changed_when: false
+      when: operation == "health"
+
+    - name: Require Nginx to be active
+      ansible.builtin.assert:
+        that:
+          - nginx_service_state.stdout == "active"
+      when: operation == "health"
+
+    - name: Inspect frontend and API container health
+      community.docker.docker_container_info:
+        name: "{{ item }}"
+      loop:
+        - todo-frontend
+        - todo-backend
+      register: application_container_health
+      no_log: true
+      when: operation == "health"
+
+    - name: Require frontend and API containers to be healthy
+      ansible.builtin.assert:
+        that:
+          - item.exists
+          - item.container.State.Status == "running"
+          - item.container.State.Health.Status == "healthy"
+        fail_msg: "A frontend or API container is missing or unhealthy."
+      loop: "{{ application_container_health.results | default([]) }}"
+      when: operation == "health"
+
+    - name: Check the HTTPS reverse proxy and certificate locally
+      ansible.builtin.command:
+        argv:
+          - curl
+          - --fail
+          - --silent
+          - --show-error
+          - --connect-timeout
+          - "5"
+          - --max-time
+          - "20"
+          - --output
+          - /dev/null
+          - --write-out
+          - "%{http_code}"
+          - --resolve
+          - "{{ app_domain_name }}:443:127.0.0.1"
+          - "https://{{ app_domain_name }}/todos"
+      register: public_api_health
+      changed_when: false
+      failed_when: public_api_health.stdout != "200"
+      when: operation == "health"
+
+    - name: Report successful application health checks
+      ansible.builtin.debug:
+        msg: "Nginx is active and the public HTTPS API returned HTTP 200 with a trusted certificate."
+      when: operation == "health"
+
+- name: Check database health
+  hosts: db
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Inspect MongoDB container health
+      community.docker.docker_container_info:
+        name: todo-mongo
+      register: mongo_container_health
+      no_log: true
+      when: operation == "health"
+
+    - name: Require MongoDB container to be healthy
+      ansible.builtin.assert:
+        that:
+          - mongo_container_health.exists
+          - mongo_container_health.container.State.Status == "running"
+          - mongo_container_health.container.State.Health.Status == "healthy"
+        fail_msg: "The MongoDB container is missing or unhealthy."
+      when: operation == "health"
+
+    - name: Ping MongoDB
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - todo-mongo
+          - mongosh
+          - --quiet
+          - --eval
+          - "db.adminCommand('ping').ok"
+      register: mongo_health
+      changed_when: false
+      when: operation == "health"
+
+    - name: Require MongoDB health check to succeed
+      ansible.builtin.assert:
+        that:
+          - mongo_health.stdout == "1"
+        fail_msg: "MongoDB did not respond successfully to its health ping."
+      when: operation == "health"
+
+    - name: Report successful database health check
+      ansible.builtin.debug:
+        msg: "MongoDB ping succeeded; the application HTTPS check also verified the API-to-database connection."
+      when: operation == "health"
+
+- name: Read application logs
+  hosts: app
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read recent frontend logs
+      ansible.builtin.command:
+        argv:
+          - docker
+          - logs
+          - --timestamps
+          - --tail
+          - "60"
+          - todo-frontend
+      register: frontend_logs
+      changed_when: false
+      when: operation == "logs"
+
+    - name: Display recent frontend logs
+      ansible.builtin.debug:
+        var: frontend_logs.stdout_lines
+      when: operation == "logs"
+
+    - name: Read recent API logs
+      ansible.builtin.command:
+        argv:
+          - docker
+          - logs
+          - --timestamps
+          - --tail
+          - "60"
+          - todo-backend
+      register: backend_logs
+      changed_when: false
+      when: operation == "logs"
+
+    - name: Display recent API logs
+      ansible.builtin.debug:
+        var: backend_logs.stdout_lines
+      when: operation == "logs"
+
+- name: Read database logs
+  hosts: db
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read recent MongoDB logs
+      ansible.builtin.command:
+        argv:
+          - docker
+          - logs
+          - --timestamps
+          - --tail
+          - "60"
+          - todo-mongo
+      register: mongo_logs
+      changed_when: false
+      when: operation == "logs"
+
+    - name: Display recent MongoDB logs
+      ansible.builtin.debug:
+        var: mongo_logs.stdout_lines
+      when: operation == "logs"
+
+- name: Restart application containers
+  hosts: app
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Restart frontend and API
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --file
+          - /opt/todoapp/docker-compose.app.yml
+          - restart
+          - frontend
+          - backend
+        chdir: /opt/todoapp
+      register: application_restart
+      changed_when: true
+      when: operation == "restart_app"
+
+    - name: Wait for the public HTTPS API after restart
+      ansible.builtin.command:
+        argv:
+          - curl
+          - --fail
+          - --silent
+          - --show-error
+          - --connect-timeout
+          - "5"
+          - --max-time
+          - "20"
+          - --output
+          - /dev/null
+          - --write-out
+          - "%{http_code}"
+          - --resolve
+          - "{{ app_domain_name }}:443:127.0.0.1"
+          - "https://{{ app_domain_name }}/todos"
+      register: restarted_api_health
+      changed_when: false
+      failed_when: restarted_api_health.stdout != "200"
+      retries: 12
+      delay: 5
+      until: restarted_api_health.stdout == "200"
+      no_log: true
+      when: operation == "restart_app"
+
+    - name: Report successful application restart
+      ansible.builtin.debug:
+        msg: "Frontend and API restarted; public HTTPS health check passed."
+      when: operation == "restart_app"
+
+- name: Restart MongoDB container
+  hosts: db
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Restart MongoDB without removing its persistent disks
+      ansible.builtin.command:
+        argv:
+          - docker
+          - restart
+          - todo-mongo
+      changed_when: true
+      when: operation == "restart_database"
+
+    - name: Wait for MongoDB after restart
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - todo-mongo
+          - mongosh
+          - --quiet
+          - --eval
+          - "db.adminCommand('ping').ok"
+      register: restarted_mongo_health
+      changed_when: false
+      retries: 20
+      delay: 3
+      until: restarted_mongo_health.rc == 0
+      when: operation == "restart_database"
+
+    - name: Report successful database restart
+      ansible.builtin.debug:
+        msg: "MongoDB restarted and passed its health check; persistent data disks were left attached."
+      when: operation == "restart_database"
+
+- name: Remove MongoDB container for a persistence test
+  hosts: db
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Remove only the MongoDB container, preserving both mounted disks
+      community.docker.docker_container:
+        name: todo-mongo
+        state: absent
+      no_log: true
+      when: operation == "recreate_database"
+
+    - name: Report the persistence-test preparation
+      ansible.builtin.debug:
+        msg: "The MongoDB container was removed; persistent data and backup disks were not modified."
+      when: operation == "recreate_database"
+
+- name: Create an on-demand database backup
+  hosts: db
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Run the MongoDB backup service
+      ansible.builtin.systemd:
+        name: todo-mongo-backup.service
+        state: started
+      when: operation == "backup"
+
+    - name: Find the available MongoDB backup archives
+      ansible.builtin.find:
+        paths: "{{ mongo_backup_dir }}"
+        patterns: "*.archive.gz"
+        file_type: file
+        recurse: false
+      register: mongo_backup_archives
+      when: operation == "backup"
+
+    - name: Require at least one backup archive
+      ansible.builtin.assert:
+        that:
+          - mongo_backup_archives.matched | int > 0
+        fail_msg: "The MongoDB backup service completed without an archive."
+      when: operation == "backup"
+
+    - name: Report available backup archives
+      ansible.builtin.debug:
+        msg: >-
+          Backup archives: {{
+            mongo_backup_archives.files
+            | map(attribute='path')
+            | map('basename')
+            | list
+          }}
+      when: operation == "backup"
+
+- name: Verify the latest backup in an isolated MongoDB container
+  hosts: db
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Restore the latest backup into a temporary database
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/test-todo-mongodb-restore
+      register: isolated_restore
+      changed_when: true
+      when: operation == "restore_test"
+
+    - name: Require the isolated restore test to succeed
+      ansible.builtin.assert:
+        that:
+          - isolated_restore.rc == 0
+        fail_msg: "The isolated MongoDB restore test failed; inspect its output above."
+      when: operation == "restore_test"
+
+    - name: Report successful isolated restore
+      ansible.builtin.debug:
+        msg: "The latest MongoDB backup was restored successfully in a temporary container."
+      when: operation == "restore_test"

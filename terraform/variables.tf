@@ -71,17 +71,6 @@ variable "ssh_public_key" {
   }
 }
 
-variable "ssh_allowed_cidrs" {
-  description = "IPv4 CIDRs permitted to SSH to the application VM. The workflow supplies the current runner IP."
-  type        = list(string)
-  default     = ["127.0.0.1/32"]
-
-  validation {
-    condition     = length(var.ssh_allowed_cidrs) > 0
-    error_message = "At least one SSH source CIDR must be configured."
-  }
-}
-
 variable "app_subnet_cidr" {
   description = "IPv4 range for the application subnet."
   type        = string

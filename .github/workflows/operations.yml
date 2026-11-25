@@ -1,0 +1,278 @@
+name: Operate ToDo App on GCP
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: HCP Terraform workspace containing the deployment
+        type: choice
+        options:
+          - dev
+          - homolog
+          - prod
+        default: dev
+        required: true
+      instance_name:
+        description: Exact base name used when deploying the resources
+        type: string
+        default: vm-todo-pm04
+        required: true
+      operation:
+        description: Health check, logs, service restart, or database recovery action
+        type: choice
+        options:
+          - health
+          - logs
+          - restart_app
+          - restart_database
+          - recreate_database
+          - backup
+          - restore_test
+        default: health
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: pm04-infrastructure
+  cancel-in-progress: false
+
+jobs:
+  operate:
+    name: Run ${{ inputs.operation }} in ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    env:
+      TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+      TF_VAR_region: ${{ vars.GCP_REGION }}
+      TF_VAR_zone: ${{ vars.GCP_ZONE }}
+      TF_WORKSPACE: pm04-todoapp-${{ inputs.environment }}
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
+    steps:
+      - name: Checkout deployment source
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+
+      - name: Set up Ansible
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/ansible-venv"
+          "$RUNNER_TEMP/ansible-venv/bin/pip" install --disable-pip-version-check ansible-core==2.18.6
+          "$RUNNER_TEMP/ansible-venv/bin/ansible-galaxy" collection install -r ansible/requirements.yml
+          echo "$RUNNER_TEMP/ansible-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Check the operational playbook syntax
+        run: ansible-playbook -i localhost, ansible/operations.yml --syntax-check
+
+      - name: Validate deployment configuration
+        env:
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_ZONE: ${{ vars.GCP_ZONE }}
+          TF_API_TOKEN_CONFIGURED: ${{ secrets.TF_API_TOKEN != '' }}
+          SSH_PRIVATE_KEY_CONFIGURED: ${{ secrets.SSH_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          for name in GCP_WORKLOAD_IDENTITY_PROVIDER GCP_SERVICE_ACCOUNT GCP_PROJECT_ID GCP_REGION GCP_ZONE; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required."
+              exit 1
+            fi
+          done
+          for name in TF_API_TOKEN SSH_PRIVATE_KEY; do
+            configured_name="${name}_CONFIGURED"
+            if [ "${!configured_name}" != "true" ]; then
+              echo "::error::$name secret is required."
+              exit 1
+            fi
+          done
+          test "$GCP_SERVICE_ACCOUNT" = "pm04-github-actions@$GCP_PROJECT_ID.iam.gserviceaccount.com" || {
+            echo "::error::GCP_SERVICE_ACCOUNT must be pm04-github-actions in GCP_PROJECT_ID."
+            exit 1
+          }
+          case "$GCP_WORKLOAD_IDENTITY_PROVIDER" in
+            projects/*/locations/global/workloadIdentityPools/github-actions/providers/github) ;;
+            *) echo "::error::GCP_WORKLOAD_IDENTITY_PROVIDER must identify the github-actions/github provider."; exit 1 ;;
+          esac
+          case "$GCP_ZONE" in
+            "$GCP_REGION"-*) ;;
+            *) echo "::error::GCP_ZONE must belong to GCP_REGION."; exit 1 ;;
+          esac
+
+      - name: Authenticate to Google Cloud with Workload Identity Federation
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure SSH key for the runner
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d "$HOME/.ssh"
+          KEY_FILE="$RUNNER_TEMP/pm04-operations-key"
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          eval "$(ssh-agent -s)"
+          ssh-add "$KEY_FILE"
+          SSH_PUBLIC_KEY="$(ssh-keygen -y -f "$KEY_FILE")"
+          echo "TF_VAR_ssh_public_key=$SSH_PUBLIC_KEY" >> "$GITHUB_ENV"
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+
+      - name: Verify the deployment and prepare its outputs
+        env:
+          TF_TOKEN_app_terraform_io: ${{ secrets.TF_API_TOKEN }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          INSTANCE_NAME: ${{ inputs.instance_name }}
+        run: |
+          set -euo pipefail
+          cd terraform
+          terraform init -input=false
+          terraform validate
+          DEPLOYED_ID="$(terraform output -raw deployment_id)"
+          EXPECTED_ID="${INSTANCE_NAME}-${ENVIRONMENT}"
+          if [ "$DEPLOYED_ID" != "$EXPECTED_ID" ]; then
+            echo "::error::Workspace deployment_id '$DEPLOYED_ID' does not match '$EXPECTED_ID'; refusing to operate."
+            exit 1
+          fi
+          INSTANCE_TYPE="$(terraform output -raw instance_type)"
+          terraform plan -input=false -out="$RUNNER_TEMP/pm04-operations.tfplan" \
+            -var="environment=$ENVIRONMENT" \
+            -var="instance_name=$INSTANCE_NAME" \
+            -var="instance_type=$INSTANCE_TYPE"
+          terraform apply -input=false -auto-approve "$RUNNER_TEMP/pm04-operations.tfplan"
+          APP_IP="$(terraform output -raw app_public_ipv4_address)"
+          DB_IP="$(terraform output -raw db_private_ipv4_address)"
+          APP_URL="$(terraform output -raw application_url)"
+          MONGO_VOLUME_NAME="$(terraform output -raw mongo_volume_name)"
+          MONGO_BACKUP_VOLUME_NAME="$(terraform output -raw mongo_backup_volume_name)"
+          echo "APP_IP=$APP_IP" >> "$GITHUB_ENV"
+          echo "DB_IP=$DB_IP" >> "$GITHUB_ENV"
+          echo "APP_URL=$APP_URL" >> "$GITHUB_ENV"
+          echo "MONGO_VOLUME_NAME=$MONGO_VOLUME_NAME" >> "$GITHUB_ENV"
+          echo "MONGO_BACKUP_VOLUME_NAME=$MONGO_BACKUP_VOLUME_NAME" >> "$GITHUB_ENV"
+
+      - name: Wait for both VMs to become accessible over SSH
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          INSTANCE_NAME: ${{ inputs.instance_name }}
+        run: |
+          set -euo pipefail
+          APP_INSTANCE="${INSTANCE_NAME}-${ENVIRONMENT}-app"
+          DB_INSTANCE="${INSTANCE_NAME}-${ENVIRONMENT}-db"
+          APP_PROXY="gcloud compute start-iap-tunnel $APP_INSTANCE 22 --listen-on-stdin --project=$TF_VAR_project_id --zone=$TF_VAR_zone"
+          DB_PROXY="gcloud compute start-iap-tunnel $DB_INSTANCE 22 --listen-on-stdin --project=$TF_VAR_project_id --zone=$TF_VAR_zone"
+          for attempt in $(seq 1 36); do
+            if ssh -o BatchMode=yes -o ConnectTimeout=5 \
+              -o "ProxyCommand=$APP_PROXY" -o StrictHostKeyChecking=no ubuntu@"$APP_IP" true; then
+              break
+            fi
+            if [ "$attempt" -eq 36 ]; then
+              echo "::error::App VM did not become reachable over SSH."
+              exit 1
+            fi
+            sleep 10
+          done
+          for attempt in $(seq 1 36); do
+            if ssh -o BatchMode=yes -o ConnectTimeout=5 \
+              -o "ProxyCommand=$DB_PROXY" -o StrictHostKeyChecking=no ubuntu@"$DB_IP" true; then
+              echo "Both VMs are reachable over IAP-protected SSH."
+              exit 0
+            fi
+            if [ "$attempt" -eq 36 ]; then
+              echo "::error::DB VM did not become reachable over IAP-protected SSH."
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Validate credentials for MongoDB container recreation
+        if: inputs.operation == 'recreate_database'
+        env:
+          MONGODB_ROOT_PASSWORD_CONFIGURED: ${{ secrets.MONGODB_ROOT_PASSWORD != '' }}
+          MONGODB_APP_PASSWORD_CONFIGURED: ${{ secrets.MONGODB_APP_PASSWORD != '' }}
+        run: |
+          set -euo pipefail
+          test "$MONGODB_ROOT_PASSWORD_CONFIGURED" = "true" && test "$MONGODB_APP_PASSWORD_CONFIGURED" = "true" || {
+            echo "::error::MongoDB deployment secrets are required to recreate the database container."
+            exit 1
+          }
+
+      - name: Run the requested Ansible operation
+        env:
+          OPERATION: ${{ inputs.operation }}
+          INSTANCE_NAME: ${{ inputs.instance_name }}
+          MONGO_VOLUME_NAME: ${{ env.MONGO_VOLUME_NAME }}
+          MONGO_BACKUP_VOLUME_NAME: ${{ env.MONGO_BACKUP_VOLUME_NAME }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          actions = {"health", "logs", "restart_app", "restart_database", "recreate_database", "backup", "restore_test"}
+          operation = os.environ["OPERATION"]
+          if operation not in actions:
+              raise SystemExit("Unsupported operational action.")
+          temp = Path(os.environ["RUNNER_TEMP"])
+          operation_path = temp / "ansible-operation.json"
+          operation_path.write_text(json.dumps({"operation": operation}), encoding="utf-8")
+          operation_path.chmod(0o600)
+          if operation == "recreate_database":
+              database_path = temp / "ansible-recreate-database.json"
+              database_path.write_text(json.dumps({
+                  "instance_name": os.environ["INSTANCE_NAME"],
+                  "docker_image": "todo-app",
+                  "docker_tag": "1.0.0",
+                  "update_os": False,
+                  "extra_packages": "curl,git,unzip",
+                  "mongo_volume_name": os.environ["MONGO_VOLUME_NAME"],
+                  "mongo_backup_volume_name": os.environ["MONGO_BACKUP_VOLUME_NAME"],
+              }), encoding="utf-8")
+              database_path.chmod(0o600)
+          PY
+          ansible-playbook -i ansible/inventory/hosts.ini ansible/operations.yml \
+            --extra-vars "@$RUNNER_TEMP/ansible-operation.json"
+
+      - name: Recreate MongoDB from the idempotent database role
+        if: inputs.operation == 'recreate_database'
+        env:
+          MONGODB_ROOT_PASSWORD: ${{ secrets.MONGODB_ROOT_PASSWORD }}
+          MONGODB_APP_PASSWORD: ${{ secrets.MONGODB_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          ansible-playbook -i ansible/inventory/hosts.ini ansible/playbook.yml \
+            --limit db-vm \
+            --extra-vars "@$RUNNER_TEMP/ansible-recreate-database.json"
+
+      - name: Verify and display the public application URL
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 12); do
+            if curl --fail --silent --show-error --max-time 20 "$APP_URL/todos" >/dev/null; then
+              echo "ToDo App is available at $APP_URL"
+              exit 0
+            fi
+            if [ "$attempt" -eq 12 ]; then
+              echo "::error::Public HTTPS health check failed after the operation."
+              exit 1
+            fi
+            sleep 5
+          done

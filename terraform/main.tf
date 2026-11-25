@@ -39,7 +39,7 @@ resource "google_compute_firewall" "app_ssh" {
   direction = "INGRESS"
   priority  = 1000
 
-  source_ranges = var.ssh_allowed_cidrs
+  source_ranges = ["35.235.240.0/20"]
   target_tags   = ["todo-app"]
 
   allow {
@@ -69,7 +69,7 @@ resource "google_compute_firewall" "database_ssh" {
   direction = "INGRESS"
   priority  = 1000
 
-  source_ranges = [var.app_subnet_cidr]
+  source_ranges = ["35.235.240.0/20"]
   target_tags   = ["todo-db"]
 
   allow {
@@ -84,8 +84,8 @@ resource "google_compute_firewall" "database_mongodb" {
   direction = "INGRESS"
   priority  = 1000
 
-  source_ranges = [var.app_subnet_cidr]
-  target_tags   = ["todo-db"]
+  source_tags = ["todo-app"]
+  target_tags = ["todo-db"]
 
   allow {
     protocol = "tcp"
@@ -226,14 +226,15 @@ resource "local_file" "ansible_inventory" {
   filename = "${path.module}/../ansible/inventory/hosts.ini"
   content  = <<-EOT
     [app]
-    app-vm ansible_host=${google_compute_instance.app.network_interface[0].access_config[0].nat_ip} ansible_public_ip=${google_compute_instance.app.network_interface[0].access_config[0].nat_ip} ansible_private_ip=${google_compute_instance.app.network_interface[0].network_ip} ansible_user=${var.ssh_user} ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+    app-vm ansible_host=${google_compute_instance.app.network_interface[0].access_config[0].nat_ip} ansible_public_ip=${google_compute_instance.app.network_interface[0].access_config[0].nat_ip} ansible_private_ip=${google_compute_instance.app.network_interface[0].network_ip} ansible_user=${var.ssh_user} ansible_ssh_common_args='-o ProxyCommand="gcloud compute start-iap-tunnel ${google_compute_instance.app.name} 22 --listen-on-stdin --project=${var.project_id} --zone=${var.zone}" -o StrictHostKeyChecking=no'
 
     [db]
-    db-vm ansible_host=${google_compute_instance.database.network_interface[0].network_ip} ansible_private_ip=${google_compute_instance.database.network_interface[0].network_ip} ansible_user=${var.ssh_user} ansible_ssh_common_args='-J ${var.ssh_user}@${google_compute_instance.app.network_interface[0].access_config[0].nat_ip} -o StrictHostKeyChecking=no'
+    db-vm ansible_host=${google_compute_instance.database.network_interface[0].network_ip} ansible_private_ip=${google_compute_instance.database.network_interface[0].network_ip} ansible_user=${var.ssh_user} ansible_ssh_common_args='-o ProxyCommand="gcloud compute start-iap-tunnel ${google_compute_instance.database.name} 22 --listen-on-stdin --project=${var.project_id} --zone=${var.zone}" -o StrictHostKeyChecking=no'
 
     [all:vars]
     ansible_python_interpreter=/usr/bin/python3
     app_public_ip=${google_compute_instance.app.network_interface[0].access_config[0].nat_ip}
+    app_domain_name=${google_compute_instance.app.network_interface[0].access_config[0].nat_ip}.nip.io
     app_private_ip=${google_compute_instance.app.network_interface[0].network_ip}
     db_private_ip=${google_compute_instance.database.network_interface[0].network_ip}
     mongo_volume_name=${google_compute_attached_disk.mongo_data.device_name}

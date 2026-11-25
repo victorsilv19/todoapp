@@ -24,8 +24,18 @@ output "mongo_backup_volume_name" {
 }
 
 output "application_url" {
-  description = "HTTPS URL of the application; browsers will warn because its certificate is self-signed."
-  value       = "https://${google_compute_instance.app.network_interface[0].access_config[0].nat_ip}"
+  description = "Public HTTPS URL using a nip.io hostname and a Let's Encrypt certificate."
+  value       = "https://${google_compute_instance.app.network_interface[0].access_config[0].nat_ip}.nip.io"
+}
+
+output "app_domain_name" {
+  description = "Public nip.io hostname that resolves to the application VM's external IPv4 address."
+  value       = "${google_compute_instance.app.network_interface[0].access_config[0].nat_ip}.nip.io"
+}
+
+output "instance_type" {
+  description = "Configured Compute Engine machine type used by the deployment."
+  value       = var.instance_type
 }
 
 output "deployment_id" {
